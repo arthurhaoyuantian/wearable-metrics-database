@@ -12,14 +12,15 @@ class FitbitAPI:
         #check presence 
         if not tokens:
             raise Exception("no token was found -> Please authenticate first")
+        
         #token is present: 
         self.tokens = tokens
         self.access_token = tokens["access_token"]
         self.refresh_token = tokens["refresh_token"]
         self.last_request_time = 0
-        self.min_request_interval = 0.5 #rate limiting api pulls
+        self.min_request_interval = 0.5
         
-    #gets data from fitbit
+    #gets data from fitbit based on provided endpoint parameter 
     def make_request(self, endpoint):
         
         #check rate limiting 
@@ -56,11 +57,6 @@ class FitbitAPI:
         #return api key
         return response.json()
     
-    #get steps data
-    def get_steps(self, start_date, end_date):
-        self.validate_dates(start_date, end_date)
-        return self.make_request(f"user/-/activities/steps/date/{start_date}/{end_date}.json")
-        
     #function throws error if the requested date is invalid
     def validate_dates(self, start_date, end_date):
         """Validate date format is YYYY-MM-DD"""
@@ -69,3 +65,23 @@ class FitbitAPI:
             datetime.strptime(end_date, "%Y-%m-%d")
         except ValueError:
             raise ValueError("Dates must be in YYYY-MM-DD format")
+    
+    #DAILY-----------------------------------------------------------------------------------------
+    
+    def get_daily_steps(self, start_date, end_date):
+        self.validate_dates(start_date, end_date)
+        return self.make_request(f"user/-/activities/steps/date/{start_date}/{end_date}.json")
+    
+    def get_daily_heart(self, start_date, end_date):
+        self.validate_dates(start_date, end_date)
+        return self.make_request(f"user/-/activities/heart/date/{start_date}/{end_date}.json")
+    
+    #INTRADAY------------------------------------------------------------------------------------
+    
+    def get_intra_steps(self, date, detail = '1min'):
+        self.validate_dates(date, date)
+        return self.make_request(f"user/-/activities/steps/date/{date}/1d/{detail}.json")
+    
+    def get_intra_heart(self, date, detail = '1min'):
+        self.validate_dates(date, date)
+        return self.make_request(f"user/-/activities/heart/date/{date}/1d/{detail}.json")
