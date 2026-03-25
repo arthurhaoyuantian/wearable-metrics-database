@@ -1,5 +1,5 @@
 # testingdb.py
-from database import EHRDatabase
+from app.data.database import EHRDatabase
 from datetime import datetime
 
 def test_database_operations():

@@ -1,6 +1,6 @@
 import sys #connection between code and OS (terminal)
 from PyQt5.QtWidgets import QApplication
-from ui import MainWindow
+from app.ui.ui import MainWindow
 
 app = QApplication(sys.argv) #create app object with user preferences as parameter
 
