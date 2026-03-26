@@ -54,6 +54,7 @@ params = {
     "client_id": CLIENT_ID,
     "redirect_uri": REDIRECT_URI,
     "scope": "activity heartrate sleep profile",  
+    "prompt": "login"
 }
 
 #link for user to sign in

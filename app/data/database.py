@@ -17,9 +17,9 @@ class EHRDatabase:
             CREATE TABLE IF NOT EXISTS patients (
                 patient_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
-                fitbit_user_id TEXT UNIQUE,
+                fitbit_access_token TEXT UNIQUE,
+                fitbit_user_token TEXT UNIQUE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP 
-                
             )
         ''')
         
@@ -47,7 +47,7 @@ class EHRDatabase:
                 steps INTEGER,
                 heart INTEGER,
                 source TEXT,
-                FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
+                FOREIGN KEY (patient_id) REFERENCES patients(patient_id)
                 UNIQUE(patient_id, timestamp, source)
             )
         ''')
@@ -67,7 +67,7 @@ class EHRDatabase:
     #returns individual patient as a tuple 
     def get_patient_info(self, patient_id):
         cursor = self.conn.execute(
-            'SELECT patient_id, name, fitbit_user_id FROM patients WHERE patient_id = ?',
+            'SELECT patient_id, name, fitbit_access_token, fitbit_refresh_token FROM patients WHERE patient_id = ?',
             (patient_id,)
         )
         return cursor.fetchone()
@@ -81,34 +81,38 @@ class EHRDatabase:
         return cursor.fetchone() is not None
     
     #adds a patient to table
-    def add_patient(self, name, fitbit_user_id = None):
+    def add_patient(self, name, fitbit_access_token = None, fitbit_refresh_token = None):
         try:
             cursor = self.conn.execute(
-                'INSERT INTO patients (name, fitbit_user_id) VALUES (?, ?)',
-                (name, fitbit_user_id)
+                'INSERT INTO patients (name, fitbit_access_token, fitbit_refresh_token) VALUES (?, ?, ?)',
+                (name, fitbit_access_token, fitbit_refresh_token)
             )
             self.conn.commit()
             return cursor.lastrowid
         except sqlite3.IntegrityError:
             return None
     
-    def update_patient_info(self, patient_id, name=None, fitbit_user_id=None):
+    def update_patient_info(self, patient_id, name=None, fitbit_access_token = None, fitbit_refresh_token = None):
         if not self.check_patient_exists(patient_id):
             print(f"Error, patient {patient_id} not found")
             return False
     
         #building query 
         updates = []
-        params = []
+        params = [] 
         
         if name is not None:
             updates.append("name = ?")
             params.append(name)
         
-        if fitbit_user_id is not None:
-            updates.append("fitbit_user_id = ?")
-            params.append(fitbit_user_id)
-        
+        if fitbit_access_token is not None:
+            updates.append("fitbit_access_token = ?")
+            params.append(fitbit_access_token)
+            
+        if fitbit_refresh_token is not None:
+            updates.append("fitbit_refresh_token = ?")
+            params.append(fitbit_refresh_token)
+             
         #updates is empty, so no update
         if not updates:
             return True
@@ -120,11 +124,6 @@ class EHRDatabase:
             self.conn.execute(query, params)
             self.conn.commit()
             return True
-        
-        #in case of duplicate fitbit_user_id
-        except sqlite3.IntegrityError:
-            print(f"Error (Duplicate): Fitbit ID {fitbit_user_id} already in use...")
-            return False
         
         except Exception as e:
             print(f"Error updating patient: {e}")
