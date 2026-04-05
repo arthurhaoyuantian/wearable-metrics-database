@@ -11,14 +11,16 @@ from PyQt5.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QCheckBox,
+    QLineEdit,
+    QMessageBox,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QDate
 from PyQt5.QtGui import QFont
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.dates as mdates
-from app.integrations import fitbit_auth
-from app.data.database import EHRDatabase
+from src.integrations import fitbit_auth
+from src.data.database import EHRDatabase
 
 
 class MetricSelectionDialog(QDialog):
@@ -196,24 +198,41 @@ class GraphWindow(QWidget):
     def _update_axis_ticks(self):
         if not self.ax:
             return
+        
         xmin, xmax = self.current_xlim if self.current_xlim else self.ax.get_xlim()
         span_days = max(xmax - xmin, 1e-9)
-
-        if span_days > 60:
-            locator = mdates.AutoDateLocator(minticks=3, maxticks=6)
-        elif span_days > 7:
-            locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
-        elif span_days > 1:
-            locator = mdates.AutoDateLocator(minticks=5, maxticks=10)
-        else:
-            locator = mdates.AutoDateLocator(minticks=6, maxticks=12)
-
-        self.ax.xaxis.set_major_locator(locator)
-        self.ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        
+        # Check if the span is extremely small (less than 1 hour)
+        if span_days < 1/24:  # Less than 1 hour
+            from matplotlib.dates import MinuteLocator
+            # For very small ranges, use minute locator
+            interval = max(1, int(span_days * 24 * 60 / 6))  # Show about 6 ticks
+            locator = MinuteLocator(interval=interval)
+            self.ax.xaxis.set_major_locator(locator)
+            self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        elif span_days < 1:  # Less than 1 day but more than 1 hour
+            from matplotlib.dates import HourLocator
+            interval = max(1, int(span_days * 24 / 6))  # Show about 6 ticks
+            locator = HourLocator(interval=interval)
+            self.ax.xaxis.set_major_locator(locator)
+            self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        else:  # More than 1 day
+            if span_days > 60:
+                locator = mdates.AutoDateLocator(minticks=3, maxticks=6)
+            elif span_days > 7:
+                locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
+            elif span_days > 1:
+                locator = mdates.AutoDateLocator(minticks=5, maxticks=10)
+            else:
+                locator = mdates.AutoDateLocator(minticks=6, maxticks=12)
+            
+            self.ax.xaxis.set_major_locator(locator)
+            self.ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        
         for label in self.ax.get_xticklabels():
             label.set_rotation(30)
             label.set_ha("right")
-
+            
     def _apply_xlim(self, new_start, new_end):
         if not self.ax or not self.full_xlim:
             return
@@ -338,11 +357,135 @@ class GraphWindow(QWidget):
             self._draw_empty_chart("Invalid date range.")
             return
 
-        daily_data = self.db.get_patient_daily_health_data(patient_id, start_date, end_date)
+        # FIRST: Check what data already exists in the database for this range
+        self.status_label.setText(f"Checking existing data from {start_date} to {end_date}...")
+        self.canvas.draw()
+        
+        # Get ALL dates in the range
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        all_dates_in_range = []
+        current = start_dt
+        while current <= end_dt:
+            all_dates_in_range.append(current.strftime("%Y-%m-%d"))
+            current += timedelta(days=1)
+        
+        # Get existing daily data dates
+        existing_daily_data = self.db.get_patient_daily_health_data(patient_id, start_date, end_date)
+        existing_daily_dates = {row[0] for row in existing_daily_data}
+        
+        # Get existing intraday data dates
         start_datetime = f"{start_date} 00:00:00"
         end_datetime = f"{end_date} 23:59:59"
-        intraday_data = self.db.get_patient_intraday_health_data(patient_id, start_datetime, end_datetime)
+        existing_intraday_data = self.db.get_patient_intraday_health_data(patient_id, start_datetime, end_datetime)
+        existing_intraday_dates = {row[0].split()[0] for row in existing_intraday_data}  # Extract just the date part
+        
+        # Determine what data we need based on selected metrics
+        needs_daily = False
+        needs_intraday = False
+        for metric_name, mode in self.metric_selection.items():
+            if mode in ("daily", "both"):
+                needs_daily = True
+            if mode in ("intraday", "both"):
+                needs_intraday = True
+        
+        # Check which dates are missing
+        missing_daily_dates = []
+        missing_intraday_dates = []
+        
+        if needs_daily:
+            missing_daily_dates = [d for d in all_dates_in_range if d not in existing_daily_dates]
+        
+        if needs_intraday:
+            missing_intraday_dates = [d for d in all_dates_in_range if d not in existing_intraday_dates]
+        
+        # If data is missing, try to import
+        if missing_daily_dates or missing_intraday_dates:
+            # Check if patient has Fitbit tokens
+            patient_info = self.db.get_patient_info(patient_id)
+            has_tokens = patient_info and patient_info[2] and patient_info[3]
+            
+            if has_tokens:
+                # Build missing data description for the user
+                missing_desc = []
+                if missing_daily_dates:
+                    missing_desc.append(f"{len(missing_daily_dates)} daily data points")
+                if missing_intraday_dates:
+                    missing_desc.append(f"{len(missing_intraday_dates)} days of intraday data")
+                
+                missing_text = " and ".join(missing_desc)
+                
+                # Ask user if they want to import missing data
+                reply = QMessageBox.question(
+                    self, 
+                    'Import Fitbit Data?',
+                    f'Missing {missing_text} for {start_date} to {end_date}.\n\n'
+                    f'Would you like to import this data from Fitbit?\n'
+                    f'(This may take a moment for large date ranges)',
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                
+                if reply == QMessageBox.Yes:
+                    # Import missing data
+                    self.status_label.setText(f"Importing missing Fitbit data from {start_date} to {end_date}...")
+                    self.canvas.draw()
+                    
+                    try:
+                        # Only import what's needed based on selected metrics
+                        imported_count = self.db.import_fitbit_data(
+                            patient_id=patient_id,
+                            start=start_date,
+                            end=end_date,
+                            include_intraday=needs_intraday
+                        )
+                        
+                        self.status_label.setText(
+                            f"Imported {imported_count} data records. Refreshing data..."
+                        )
+                        self.canvas.draw()
+                        
+                        # Refresh data after import
+                        daily_data = self.db.get_patient_daily_health_data(patient_id, start_date, end_date)
+                        intraday_data = self.db.get_patient_intraday_health_data(patient_id, start_datetime, end_datetime)
+                        
+                    except Exception as e:
+                        self.status_label.setText(f"Error importing Fitbit data: {str(e)}")
+                        # Continue with whatever data we have
+                        daily_data = existing_daily_data
+                        intraday_data = existing_intraday_data
+                else:
+                    self.status_label.setText("Using existing data only.")
+                    daily_data = existing_daily_data
+                    intraday_data = existing_intraday_data
+            else:
+                self.status_label.setText("No Fitbit tokens found. Connect to Fitbit first to import data.")
+                self._draw_empty_chart("Connect to Fitbit to import data.")
+                return
+        else:
+            # No data missing, use existing data
+            daily_data = existing_daily_data
+            intraday_data = existing_intraday_data
+            self.status_label.setText("Using existing data from database.")
+        
+        # Now check if we have any data to display
+        has_daily_data = len(daily_data) > 0
+        has_intraday_data = len(intraday_data) > 0
+        
+        # Final check: do we have any data to display?
+        data_available = False
+        for metric_name, mode in self.metric_selection.items():
+            if mode in ("daily", "both") and has_daily_data:
+                data_available = True
+            if mode in ("intraday", "both") and has_intraday_data:
+                data_available = True
+        
+        if not data_available:
+            self.status_label.setText(f"No data available for {start_date} to {end_date}.")
+            self._draw_empty_chart("No data available in selected date range.")
+            return
 
+        # ... rest of your plotting code remains the same ...
         metric_specs = {
             "heart": {
                 "daily_idx": 2,
@@ -372,7 +515,7 @@ class GraphWindow(QWidget):
                 continue
             spec = metric_specs[metric_name]
 
-            if mode in ("daily", "both"):
+            if mode in ("daily", "both") and has_daily_data:
                 metric_daily = [(row[0], row[spec["daily_idx"]]) for row in daily_data if row[spec["daily_idx"]] is not None]
                 if metric_daily:
                     daily_dates = [datetime.strptime(d, "%Y-%m-%d") for d, _ in metric_daily]
@@ -391,7 +534,7 @@ class GraphWindow(QWidget):
                     plotted_any = True
                     plotted_labels.append(spec["daily_label"])
 
-            if mode in ("intraday", "both"):
+            if mode in ("intraday", "both") and has_intraday_data:
                 metric_intraday = [
                     (row[0], row[spec["intraday_idx"]])
                     for row in intraday_data
@@ -443,15 +586,35 @@ class GraphWindow(QWidget):
             f"Showing {', '.join(plotted_labels)} for patient {patient_id} "
             f"from {start_date} to {end_date}. Drag chart to pan."
         )
-
+    
     def closeEvent(self, event):
         self.db.close()
         super().closeEvent(event)
 
+class AddPatientDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Patient")
+        self.resize(300, 120)
 
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("Enter patient name")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Patient Name:"))
+        layout.addWidget(self.name_input)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+    def get_name(self):
+        return self.name_input.text().strip()
 class MainWindow(QWidget):
     token_recieved = pyqtSignal(str)
-
+    
     def __init__(self):
         super().__init__()
         self.graph_windows = []
@@ -469,10 +632,21 @@ class MainWindow(QWidget):
         self.open_graph_button = QPushButton("Open Graph Window")
         self.status_label = QLabel("Ready.")
         self.status_label.setAlignment(Qt.AlignCenter)
+        
+        self.db = EHRDatabase("test.db")
+        self.patient_dropdown = QComboBox()
+        self.patient_dropdown.setMinimumWidth(220)
+        self.refresh_patients()
 
+        self.add_patient_button = QPushButton("Add Patient")
+        self.add_patient_button.clicked.connect(self.on_add_patient)
+        
         row = QHBoxLayout()
+        row.addWidget(QLabel("Patient:"))
+        row.addWidget(self.patient_dropdown)
         row.addWidget(self.connect_button)
         row.addWidget(self.open_graph_button)
+        row.addWidget(self.add_patient_button)
 
         layout = QVBoxLayout()
         layout.addStretch()
@@ -485,11 +659,39 @@ class MainWindow(QWidget):
 
         self.connect_button.clicked.connect(self.on_login_click)
         self.open_graph_button.clicked.connect(self.open_graph_window)
+    
+    def on_add_patient(self):
+        dialog = AddPatientDialog(self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        name = dialog.get_name()
+        if not name:
+            self.status_label.setText("Patient name cannot be empty.")
+            return
+        patient_id = self.db.add_patient(name)
+        if patient_id:
+            self.status_label.setText(f"Added patient: {name}")
+            self.refresh_patients()
+        else:
+            self.status_label.setText("Failed to add patient (may already exist).")
+    
+    def refresh_patients(self):
+        self.patient_dropdown.clear()
+        patients = self.db.get_all_patients()
+        for patient_id, name in patients:
+            self.patient_dropdown.addItem(f"{name} (ID: {patient_id})", patient_id)
+        if not patients:
+            self.patient_dropdown.addItem("No patients available", None)
 
     def on_login_click(self):
+        fitbit_auth.set_db(self.db)
+        selected_id = self.patient_dropdown.currentData()  
+        if selected_id is None:
+            self.status_label.setText("Select a patient first.")
+            return
         self.status_label.setText("Attempting to connect...")
         fitbit_auth.start_server()
-        fitbit_auth.start_auth_flow()
+        fitbit_auth.start_auth_flow(selected_id)
         self.status_label.setText("Fitbit auth launched in browser.")
 
     def open_graph_window(self):

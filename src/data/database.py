@@ -2,7 +2,7 @@ import sqlite3
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from app.integrations.fitbit_api import FitbitAPI
+from src.integrations.fitbit_api import FitbitAPI
 
 class EHRDatabase:
     #constructor -> connects app to database file and creates the tables
@@ -18,7 +18,7 @@ class EHRDatabase:
                 patient_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 fitbit_access_token TEXT UNIQUE,
-                fitbit_user_token TEXT UNIQUE,
+                fitbit_refresh_token TEXT UNIQUE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP 
             )
         ''')
@@ -209,7 +209,6 @@ class EHRDatabase:
         
     #adds both daily and intraday FITBIT data from the given time period to the database
     def import_fitbit_data(self, patient_id, start, end, include_intraday=True):
-        
         #highlight patient
         patient = self.get_patient_info(patient_id) 
         if not patient:
@@ -217,7 +216,12 @@ class EHRDatabase:
             return 0
         
         #getting data
-        api = FitbitAPI()
+        api = FitbitAPI(
+            access_token=patient[2],
+            refresh_token=patient[3],
+            db=self,
+            patient_id=patient_id
+        )
         imported_count = 0
         
         #daily

@@ -2,7 +2,7 @@ import json
 import requests
 import time
 from datetime import datetime, timedelta
-from app.integrations.fitbit_auth import (
+from src.integrations.fitbit_auth import (
     load_tokens,
     refresh_access_token,
     check_token_expiry,
@@ -10,17 +10,11 @@ from app.integrations.fitbit_auth import (
 
 class FitbitAPI:
     #class constructor
-    def __init__(self):
-        #create token object
-        tokens = check_token_expiry()
-        #check presence 
-        if not tokens:
-            raise Exception("no token was found -> Please authenticate first")
-        
-        #token is present: 
-        self.tokens = tokens
-        self.access_token = tokens["access_token"]
-        self.refresh_token = tokens["refresh_token"]
+    def __init__(self, access_token, refresh_token, db=None, patient_id=None):
+        self.access_token = access_token
+        self.refresh_token = refresh_token
+        self.db = db
+        self.patient_id = patient_id
         self.last_request_time = 0
         self.min_request_interval = 0.5
         
@@ -46,7 +40,7 @@ class FitbitAPI:
             if response.status_code == 401:
                 print("Token expired, refreshing...")
                 # Use the imported refresh function
-                new_tokens = refresh_access_token(self.refresh_token)
+                new_tokens = refresh_access_token(self.db, self.patient_id, self.refresh_token)
                 self.tokens = new_tokens
                 self.access_token = new_tokens["access_token"]
                 self.refresh_token = new_tokens["refresh_token"]
