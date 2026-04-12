@@ -1,0 +1,2 @@
+patient_id,date,source,steps,heart,resting_heart_rate,active_zone_minutes,spo2_avg,blood_pressure_systolic,blood_pressure_diastolic,calories,hrv,sleep_minutes,distance
+1,2025-01-15,manual,8500,72,58,,,,,,,480,5.2

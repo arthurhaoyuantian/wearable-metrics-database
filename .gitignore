@@ -3,5 +3,5 @@
 **/.env
 env/
 
-# JSON file 
-tokens.json
+# Local app data
+storage/ehr.sqlite

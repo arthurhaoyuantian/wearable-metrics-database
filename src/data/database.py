@@ -1,14 +1,22 @@
+import logging
 import sqlite3
-from collections import defaultdict
+from pathlib import Path
 from datetime import datetime, timedelta
 
-from src.integrations.fitbit_api import FitbitAPI
+from src.integrations import csv_import, fitbit_import
+from src.paths import database_path
+
+logger = logging.getLogger(__name__)
+
 
 class EHRDatabase:
     #constructor -> connects app to database file and creates the tables
-    def __init__(self, db_path = "test.db"):
-        self.conn = sqlite3.connect(db_path)
+    def __init__(self, db_path=None):
+        path = database_path() if db_path is None else Path(db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(path))
         self.create_tables()
+        logger.info("EHRDatabase opened at %s", path.resolve())
         
     #creates tables
     def create_tables(self):
@@ -33,6 +41,15 @@ class EHRDatabase:
                 heart INTEGER,
                 source TEXT,
                 imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                resting_heart_rate INTEGER,
+                active_zone_minutes INTEGER,
+                spo2_avg REAL,
+                blood_pressure_systolic INTEGER,
+                blood_pressure_diastolic INTEGER,
+                calories REAL,
+                hrv REAL,
+                sleep_minutes INTEGER,
+                distance REAL,
                 FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
                 UNIQUE (patient_id, date, source)
             )
@@ -47,15 +64,52 @@ class EHRDatabase:
                 steps INTEGER,
                 heart INTEGER,
                 source TEXT,
-                FOREIGN KEY (patient_id) REFERENCES patients(patient_id)
+                active_zone_minutes INTEGER,
+                spo2 REAL,
+                calories REAL,
+                hrv REAL,
+                distance REAL,
+                FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
                 UNIQUE(patient_id, timestamp, source)
             )
         ''')
         
+        self._migrate_health_columns()
+        
         #save changes
         self.conn.commit()
-        
-        
+
+    def _migrate_health_columns(self):
+        def add_cols(table, cols):
+            existing = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+            for name, typ in cols:
+                if name not in existing:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+
+        add_cols(
+            "daily_data",
+            [
+                ("resting_heart_rate", "INTEGER"),
+                ("active_zone_minutes", "INTEGER"),
+                ("spo2_avg", "REAL"),
+                ("blood_pressure_systolic", "INTEGER"),
+                ("blood_pressure_diastolic", "INTEGER"),
+                ("calories", "REAL"),
+                ("hrv", "REAL"),
+                ("sleep_minutes", "INTEGER"),
+                ("distance", "REAL"),
+            ],
+        )
+        add_cols(
+            "intraday_data",
+            [
+                ("active_zone_minutes", "INTEGER"),
+                ("spo2", "REAL"),
+                ("calories", "REAL"),
+                ("hrv", "REAL"),
+                ("distance", "REAL"),
+            ],
+        )
             
     #PATIENTS TABLE CRUD METHODS---------------------------------------------------------------------------------
     
@@ -94,7 +148,7 @@ class EHRDatabase:
     
     def update_patient_info(self, patient_id, name=None, fitbit_access_token = None, fitbit_refresh_token = None):
         if not self.check_patient_exists(patient_id):
-            print(f"Error, patient {patient_id} not found")
+            logger.warning("update_patient_info: patient_id=%s not found", patient_id)
             return False
     
         #building query 
@@ -126,7 +180,7 @@ class EHRDatabase:
             return True
         
         except Exception as e:
-            print(f"Error updating patient: {e}")
+            logger.exception("update_patient_info failed for patient_id=%s: %s", patient_id, e)
             return False
 
     
@@ -142,16 +196,53 @@ class EHRDatabase:
             self.conn.commit()
             return True
         except Exception as e:
-            print(f"error {e}")
+            logger.error("delete_patient failed for patient_id=%s: %s", patient_id, e)
             return False
     
     
     #DAILY HEALTH METRICS CRUD METHODS--------------------------------------------------------------------------
     
+    def get_sources_for_patient(self, patient_id):
+        """Distinct non-empty source values for this patient (daily + intraday)."""
+        cursor = self.conn.execute(
+            """
+            SELECT DISTINCT source FROM daily_data
+            WHERE patient_id = ? AND source IS NOT NULL AND TRIM(source) != ''
+            UNION
+            SELECT DISTINCT source FROM intraday_data
+            WHERE patient_id = ? AND source IS NOT NULL AND TRIM(source) != ''
+            ORDER BY source
+            """,
+            (patient_id, patient_id),
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+    def daily_dates_existing_for_source(self, patient_id, source, dates):
+        """Dates (YYYY-MM-DD strings) in *dates* that already have a daily_data row for this patient and source."""
+        if not dates:
+            return []
+        placeholders = ",".join("?" * len(dates))
+        cursor = self.conn.execute(
+            f"""
+            SELECT date FROM daily_data
+            WHERE patient_id = ? AND source = ? AND date IN ({placeholders})
+            """,
+            (patient_id, source, *dates),
+        )
+        return sorted({row[0] for row in cursor.fetchall()})
+
     #returns the health metrics of a patient, filtered by date range if included -> CONNECTION TO UI
-    def get_patient_daily_health_data(self, patient_id, start_date = None, end_date = None):
+    def get_patient_daily_health_data(
+        self, patient_id, start_date=None, end_date=None, source=None
+    ):
+        # Row shape: date, patient_id, source, then metrics A–Z:
+        # active_zone_minutes, blood_pressure_diastolic, blood_pressure_systolic, calories,
+        # distance, heart, hrv, resting_heart_rate, sleep_minutes, spo2_avg, steps
         query = '''
-            SELECT date, steps, heart, source FROM daily_data 
+            SELECT date, patient_id, source,
+                   active_zone_minutes, blood_pressure_diastolic, blood_pressure_systolic,
+                   calories, distance, heart, hrv, resting_heart_rate, sleep_minutes, spo2_avg, steps
+            FROM daily_data 
             WHERE patient_id = ?
         '''
         params = [patient_id]
@@ -162,6 +253,9 @@ class EHRDatabase:
         if end_date:
             query += ' AND date <= ?'
             params.append(end_date)
+        if source is not None:
+            query += ' AND source = ?'
+            params.append(source)
         
         query += ' ORDER BY date'
         
@@ -172,7 +266,7 @@ class EHRDatabase:
     def get_latest_daily_health_entry_date(self, patient_id):
         try:
             if not self.check_patient_exists(patient_id):
-                print(f"Warning: Patient {patient_id} not found")
+                logger.warning("get_latest_daily_health_entry_date: patient_id=%s not found", patient_id)
                 return None
             
             cursor = self.conn.execute('''
@@ -185,21 +279,61 @@ class EHRDatabase:
             result = cursor.fetchone()
             
             if result:
-                print(f"Latest data for patient {patient_id}:{result[0]}")
+                logger.debug("Latest daily date for patient_id=%s is %s", patient_id, result[0])
                 return result[0]
             else:
                 return None
         except Exception as e:
-            print(f"Error getting latest health date: {e}")
+            logger.error("get_latest_daily_health_entry_date error: %s", e)
             return None
         
     #adds the daily health metrics for a patient -> GOOD FOR MANUAL ENTERING (METRICS ARE PARAMETERS)
-    def add_daily_health_data(self, patient_id, date, steps = None, heart = None, source = 'fitbit', commit = True):
+    def add_daily_health_data(
+        self,
+        patient_id,
+        date,
+        steps=None,
+        heart=None,
+        source="fitbit",
+        resting_heart_rate=None,
+        active_zone_minutes=None,
+        spo2_avg=None,
+        blood_pressure_systolic=None,
+        blood_pressure_diastolic=None,
+        calories=None,
+        hrv=None,
+        sleep_minutes=None,
+        distance=None,
+        commit=True,
+        replace=False,
+    ):
+        verb = "INSERT OR REPLACE" if replace else "INSERT"
         try:
-            self.conn.execute('''
-                INSERT INTO daily_data (
-                    patient_id, date, steps, heart, source) VALUES (?, ?, ?, ?, ?)
-            ''', (patient_id, date, steps, heart, source)
+            self.conn.execute(
+                f"""
+                {verb} INTO daily_data (
+                    patient_id, date, steps, heart, source,
+                    resting_heart_rate, active_zone_minutes, spo2_avg,
+                    blood_pressure_systolic, blood_pressure_diastolic,
+                    calories, hrv, sleep_minutes, distance
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    patient_id,
+                    date,
+                    steps,
+                    heart,
+                    source,
+                    resting_heart_rate,
+                    active_zone_minutes,
+                    spo2_avg,
+                    blood_pressure_systolic,
+                    blood_pressure_diastolic,
+                    calories,
+                    hrv,
+                    sleep_minutes,
+                    distance,
+                ),
             )
             if commit:
                 self.conn.commit()
@@ -207,98 +341,29 @@ class EHRDatabase:
         except sqlite3.IntegrityError:
             return False
         
-    #adds both daily and intraday FITBIT data from the given time period to the database
     def import_fitbit_data(self, patient_id, start, end, include_intraday=True):
-        #highlight patient
-        patient = self.get_patient_info(patient_id) 
-        if not patient:
-            print(f"error, patient {patient_id} not found")
-            return 0
-        
-        #getting data
-        api = FitbitAPI(
-            access_token=patient[2],
-            refresh_token=patient[3],
-            db=self,
-            patient_id=patient_id
+        return fitbit_import.import_fitbit_data(
+            self, patient_id, start, end, include_intraday=include_intraday
         )
-        imported_count = 0
-        
-        #daily
-        daily_steps_response = api.get_daily_steps(start, end)
-        daily_heart_response = api.get_daily_heart(start, end)
-        
-        metrics = defaultdict(dict)
-        if 'activities-steps' in daily_steps_response:
-            for day in daily_steps_response['activities-steps']:
-                metrics[day['dateTime']]['steps'] = int(day['value'])
-        if 'activities-heart' in daily_heart_response:
-            for day in daily_heart_response['activities-heart']:
-                metrics[day['dateTime']]['heart'] = day['value'].get('restingHeartRate')
-        
-        for date, data in metrics.items():
-            success = self.add_daily_health_data(
-                patient_id=patient_id,
-                date=date,
-                steps=data.get('steps'),
-                heart=data.get('heart'),
-                source='fitbit',
-                commit=False
-            )
-            if success:
-                imported_count += 1
-        self.conn.commit()
-        
-          
-        #intraday 
-        if include_intraday:
-            current = datetime.strptime(start, "%Y-%m-%d")
-            end_date = datetime.strptime(end, "%Y-%m-%d")
-            while current <= end_date:
-                date_str = current.strftime("%Y-%m-%d")
-                
-                intraday_metrics = defaultdict(dict)
-                
-                intraday_steps_response = api.get_intra_steps(date_str)
-                if 'activities-steps-intraday' in intraday_steps_response:
-                    for point in intraday_steps_response['activities-steps-intraday']['dataset']:
-                        timestamp = f"{date_str} {point['time']}"
-                        intraday_metrics[timestamp]['steps'] = point['value']
-                
-                intraday_heart_response = api.get_intra_heart(date_str)
-                if 'activities-heart-intraday' in intraday_heart_response:
-                    for point in intraday_heart_response['activities-heart-intraday']['dataset']:
-                        timestamp = f"{date_str} {point['time']}"
-                        intraday_metrics[timestamp]['heart'] = point['value']
-                
-                for timestamp, data in intraday_metrics.items():
-                    success = self.add_intraday_health_data(
-                        patient_id=patient_id,
-                        timestamp=timestamp,
-                        steps=data.get('steps'),
-                        heart=data.get('heart'),
-                        source='fitbit',
-                        commit=False
-                    )
-                    if success:
-                        imported_count += 1
-                self.conn.commit()
-                
-                current += timedelta(days=1)
-            
-        return imported_count
-        
-        
 
-        
-        
-        
+    def import_daily_csv_file(self, path, patient_id=None, source=None, overwrite=False):
+        """Import rows from a fixed-layout daily CSV (see ``daily_health_import_template.csv`` in project root)."""
+        return csv_import.import_daily_csv(
+            self, path, patient_id=patient_id, source=source, overwrite=overwrite
+        )
+
     #INTRADAY HEALTH METRICS CRUD METHODS---------------------------------------------------------------------
 
     #returns the health metrics of a patient, filtered by date range if included -> CONNECTION TO UI
-    def get_patient_intraday_health_data(self, patient_id, start_datetime = None, end_datetime = None):
+    def get_patient_intraday_health_data(
+        self, patient_id, start_datetime=None, end_datetime=None, source=None
+    ):
+        # Row shape: timestamp, patient_id, source, then metrics A–Z:
+        # active_zone_minutes, calories, distance, heart, hrv, spo2, steps
         query = '''
-            SELECT timestamp, steps, heart, source FROM intraday_data 
+            SELECT timestamp, patient_id, source,
+                   active_zone_minutes, calories, distance, heart, hrv, spo2, steps
+            FROM intraday_data 
             WHERE patient_id = ?
         '''
         params = [patient_id]
@@ -309,6 +374,9 @@ class EHRDatabase:
         if end_datetime:
             query += ' AND timestamp <= ?'
             params.append(end_datetime)
+        if source is not None:
+            query += ' AND source = ?'
+            params.append(source)
         
         query += ' ORDER BY timestamp'
         
@@ -324,7 +392,7 @@ class EHRDatabase:
     def get_latest_intraday_health_entry_date(self, patient_id):
         try:
             if not self.check_patient_exists(patient_id):
-                print(f"Warning: Patient {patient_id} not found")
+                logger.warning("get_latest_intraday_health_entry_date: patient_id=%s not found", patient_id)
                 return None
             
             cursor = self.conn.execute('''
@@ -337,21 +405,49 @@ class EHRDatabase:
             result = cursor.fetchone()
             
             if result:
-                print(f"Latest intraday data for patient {patient_id}:{result[0]}")
+                logger.debug("Latest intraday ts for patient_id=%s is %s", patient_id, result[0])
                 return result[0]
             else:
                 return None
         except Exception as e:
-            print(f"Error getting latest intraday entry: {e}")
+            logger.error("get_latest_intraday_health_entry_date error: %s", e)
             return None
 
     #adds data to the database        
-    def add_intraday_health_data(self, patient_id, timestamp, steps = None, heart = None, source = 'fitbit', commit = True):
+    def add_intraday_health_data(
+        self,
+        patient_id,
+        timestamp,
+        steps=None,
+        heart=None,
+        source="fitbit",
+        active_zone_minutes=None,
+        spo2=None,
+        calories=None,
+        hrv=None,
+        distance=None,
+        commit=True,
+    ):
         try:
-            self.conn.execute('''
+            self.conn.execute(
+                """
                 INSERT INTO intraday_data (
-                    patient_id, timestamp, steps, heart, source) VALUES (?, ?, ?, ?, ?)
-            ''', (patient_id, timestamp, steps, heart, source)
+                    patient_id, timestamp, steps, heart, source,
+                    active_zone_minutes, spo2, calories, hrv, distance
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    patient_id,
+                    timestamp,
+                    steps,
+                    heart,
+                    source,
+                    active_zone_minutes,
+                    spo2,
+                    calories,
+                    hrv,
+                    distance,
+                ),
             )
             if commit:
                 self.conn.commit()
@@ -377,10 +473,17 @@ class EHRDatabase:
         
         if data_type == 'daily':
             data = self.get_patient_daily_health_data(patient_id)
-            headers = ['date', 'steps', 'heart', 'source']
+            headers = [
+                'date', 'patient_id', 'source',
+                'active_zone_minutes', 'blood_pressure_diastolic', 'blood_pressure_systolic',
+                'calories', 'distance', 'heart', 'hrv', 'resting_heart_rate', 'sleep_minutes', 'spo2_avg', 'steps',
+            ]
         else:
             data = self.get_patient_intraday_health_data(patient_id)
-            headers = ['timestamp', 'steps', 'heart', 'source']
+            headers = [
+                'timestamp', 'patient_id', 'source',
+                'active_zone_minutes', 'calories', 'distance', 'heart', 'hrv', 'spo2', 'steps',
+            ]
         
         with open(filename, 'w', newline = '') as my_file:
             writer = csv.writer(my_file)
@@ -391,6 +494,7 @@ class EHRDatabase:
     
     #closes database connection 
     def close(self):
+        logger.info("EHRDatabase connection closed")
         self.conn.close()
 
     #deletes entire database
@@ -402,9 +506,9 @@ class EHRDatabase:
             self.conn.commit()
             return True
         except Exception as e:
-            print(f"Error clearing database: {e}")
+            logger.error("clear_database failed: %s", e)
             return False
 if __name__ == "__main__":
-    db = EHRDatabase("test.db")
+    db = EHRDatabase()
     db.clear_database()
     db.close()

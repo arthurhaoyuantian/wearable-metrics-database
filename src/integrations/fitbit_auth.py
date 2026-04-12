@@ -1,13 +1,15 @@
-import os
-from dotenv import load_dotenv 
-import urllib.parse #builds url
-from flask import Flask, request
-import requests #http requests
-import base64 #encoding and decoding
-import threading 
+import base64  # encoding and decoding
 import json
-from datetime import datetime, timedelta
+import logging
+import os
+import threading
+import urllib.parse  # builds url
 
+import requests  # http requests
+from dotenv import load_dotenv
+from flask import Flask, request
+
+LOG = logging.getLogger(__name__)
 
 #load and access .env variables
 load_dotenv()
@@ -52,21 +54,25 @@ app = Flask(__name__)
 
 #starts flask server
 def start_server():
-    #starts running flask server in a background threat, UI stays responsive
-    thread = threading.Thread(target = lambda: app.run(port = 8080, debug = True, use_reloader = False))
+    """Run Flask OAuth callback server in a background thread (UI stays responsive)."""
+    thread = threading.Thread(
+        target=lambda: app.run(port=8080, debug=True, use_reloader=False)
+    )
     thread.daemon = True
     thread.start()
+    LOG.info("Fitbit OAuth callback server thread started (port 8080)")
     
 #opens fitbit login webpage
 def start_auth_flow(patient_id):
     import webbrowser
-    
-    #parameters for fitbit
+
+    LOG.info("Opening Fitbit authorize URL in browser for patient_id=%s", patient_id)
+    # parameters for fitbit
     params = {
         "response_type": "code",
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
-        "scope": "activity heartrate sleep profile",  
+        "scope": "activity heartrate sleep profile oxygen_saturation",  
         "prompt": "login",
         "state": patient_id
     }
@@ -84,32 +90,25 @@ def exchange_code_for_token(auth_code):
     headers = get_auth_headers()
     data = get_token_data("authorization_code", code = auth_code)
     
-    response = requests.post(TOKEN_URL, headers = headers, data = data)
-    
-    #convert this response into a JSON string
+    response = requests.post(TOKEN_URL, headers=headers, data=data)
+    if response.status_code != 200:
+        LOG.error(
+            "exchange_code_for_token: HTTP %s from token endpoint (body truncated)",
+            response.status_code,
+        )
     token_data = response.json()
-    
     return token_data
 
-#saves token to patient in database
+# saves token to patient in database
 def save_tokens(db, patient_id, token_data):
+    LOG.info("Writing Fitbit OAuth tokens to DB for patient_id=%s", patient_id)
     db.update_patient_info(
         patient_id,
-        fitbit_access_token=token_data['access_token'],
-        fitbit_refresh_token=token_data['refresh_token']
+        fitbit_access_token=token_data["access_token"],
+        fitbit_refresh_token=token_data["refresh_token"],
     )
 
-#loads token by patient_id from database
-def load_tokens(db, patient_id):
-    patient_info = db.get_patient_info(patient_id)
-    if not patient_info:
-        return None
-    return {
-        'access_token': patient_info[2],
-        'refresh_token': patient_info[3]
-    }
-    
-#refreshes the access token
+# refreshes the access token (called from FitbitAPI on HTTP 401)
 def refresh_access_token(db, patient_id, refresh_token_value):
     headers = get_auth_headers()
     data = get_token_data("refresh_token", refresh_token = refresh_token_value)
@@ -119,27 +118,12 @@ def refresh_access_token(db, patient_id, refresh_token_value):
     token_data = response.json()
     
     #saving new token or throwing exception 
-    if 'access_token' in token_data:
+    if "access_token" in token_data:
         save_tokens(db, patient_id, token_data)
+        LOG.info("Token refresh succeeded for patient_id=%s", patient_id)
         return token_data
-    else:
-        raise Exception(f"Token refresh failed: {token_data}")
-    
-#checks for token validity and refreshes if its expired 
-def check_token_expiry(db, patient_id):
-    tokens = load_tokens(db, patient_id)
-    if not tokens:
-        return None
-    
-    #checking expiry 
-    expires_at = tokens.get('expires_at')
-    if expires_at:
-        expiry_time = datetime.fromtimestamp(expires_at)
-        if expiry_time < datetime.now():
-            print("token is expired, refreshing...")
-            return refresh_access_token(db, patient_id, tokens['refresh_token'])
-        
-    return tokens
+    LOG.error("Token refresh failed for patient_id=%s (no access_token in response)", patient_id)
+    raise Exception(f"Token refresh failed: {token_data}")
 
 _db = None
 
@@ -149,10 +133,18 @@ def set_db(db):
 @app.route("/callback")
 def callback():
     from src.data.database import EHRDatabase
+
     code = request.args.get("code")
     patient_id = request.args.get("state")
+    if not code:
+        LOG.warning("OAuth /callback hit without code query param")
+    LOG.info(
+        "OAuth /callback received (patient_id from state=%s); exchanging code for tokens",
+        patient_id,
+    )
     token_data = exchange_code_for_token(code)
-    db = EHRDatabase("test.db")
+    db = EHRDatabase()
     save_tokens(db, patient_id, token_data)
     db.close()
+    LOG.info("OAuth callback finished for patient_id=%s", patient_id)
     return "auth success! close this window and return to app!"

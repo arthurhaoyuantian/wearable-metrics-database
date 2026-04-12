@@ -2,7 +2,7 @@ from src.data.database import EHRDatabase
 from datetime import datetime
 
 def test_database_operations():
-    db = EHRDatabase("test.db")
+    db = EHRDatabase()
     
     try:
         print("=" * 50)
@@ -44,7 +44,9 @@ def test_database_operations():
         daily_data = db.get_patient_daily_health_data(patient_id, start, end)
         
         if daily_data:
-            for date, steps, heart, source in daily_data:
+            for row in daily_data:
+                date, _pid, source = row[0], row[1], row[2]
+                heart, steps = row[8], row[13]
                 print(f"   • {date}: {steps} steps | {heart} bpm ({source})")
         else:
             print("   → No daily data found")
@@ -54,7 +56,9 @@ def test_database_operations():
         intraday_data = db.get_intraday_by_date(patient_id, "2025-08-11")
         
         if intraday_data:
-            for timestamp, steps, heart, source in intraday_data[:5]:
+            for row in intraday_data[:5]:
+                timestamp, _pid, _src = row[0], row[1], row[2]
+                heart, steps = row[6], row[9]
                 print(f"   • {timestamp}: {steps} steps | {heart} bpm")
             print(f"   → ... and {len(intraday_data) - 5} more entries for this day")
         else:
@@ -83,68 +87,61 @@ def test_database_operations():
         db.close()
 
 
-def peek_database(db_path="test.db"):
-    import sqlite3
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    print("=" * 60)
-    print("DATABASE CONTENTS")
-    print("=" * 60)
-    
-    cursor.execute("SELECT patient_id, name, fitbit_access_token FROM patients")
-    patients = cursor.fetchall()
-    print(f"\n📋 PATIENTS ({len(patients)}):")
-    for p in patients:
-        token_preview = p[2][:10] + "..." if p[2] else "None"
-        print(f"   ID {p[0]}: {p[1]} (token: {token_preview})")
-    
-    if not patients:
-        print("   No patients found!")
-        conn.close()
-        return
-    
-    patient_id = patients[0][0]
-    
-    cursor.execute('''
-        SELECT date, steps, heart, source FROM daily_data 
-        WHERE patient_id = ? ORDER BY date
-    ''', (patient_id,))
-    daily = cursor.fetchall()
-    
-    print(f"\n📊 DAILY DATA (patient {patient_id}):")
-    if daily:
-        for date, steps, heart, source in daily:
-            print(f"   {date}: {steps} steps | {heart} bpm ({source})")
-        print(f"   → Total days: {len(daily)}")
-    else:
-        print("   No daily data found")
-    
-    cursor.execute('''
-        SELECT timestamp, steps, heart FROM intraday_data 
-        WHERE patient_id = ? 
-        AND timestamp BETWEEN '2025-08-11 13:20:00' AND '2025-08-11 14:00:59'
-        ORDER BY timestamp
-    ''', (patient_id,))
-    intraday_sample = cursor.fetchall()
-    
-    print(f"\n⏱️  INTRADAY DATA SAMPLE:")
-    if intraday_sample:
-        for ts, steps, heart in intraday_sample:
-            print(f"   {ts}: {steps} steps | {heart} bpm")
-        
-        cursor.execute('SELECT COUNT(*) FROM intraday_data WHERE patient_id = ?', (patient_id,))
-        print(f"   → Total intraday records: {cursor.fetchone()[0]}")
-        
-        cursor.execute('SELECT MIN(timestamp), MAX(timestamp) FROM intraday_data WHERE patient_id = ?', (patient_id,))
-        min_ts, max_ts = cursor.fetchone()
-        print(f"   → Date range: {min_ts} to {max_ts}")
-    else:
-        print("   No intraday data found")
-    
-    conn.close()
+def peek_database(db_path=None):
+    db = EHRDatabase(db_path)
+    try:
+        print("=" * 60)
+        print("DATABASE CONTENTS")
+        print("=" * 60)
+
+        patients = db.get_all_patients()
+        print(f"\n📋 PATIENTS ({len(patients)}):")
+        for pid, name in patients:
+            print(f"   ID {pid}: {name}")
+
+        if not patients:
+            print("   No patients found!")
+            return
+
+        patient_id = patients[0][0]  # (patient_id, name)
+        daily = db.get_patient_daily_health_data(patient_id)
+
+        print(f"\n📊 DAILY DATA (patient {patient_id}):")
+        if daily:
+            for row in daily:
+                date, _pid, source = row[0], row[1], row[2]
+                heart, steps = row[8], row[13]
+                print(f"   {date}: {steps} steps | {heart} bpm ({source})")
+            print(f"   → Total days: {len(daily)}")
+        else:
+            print("   No daily data found")
+
+        intraday_sample = db.get_patient_intraday_health_data(
+            patient_id, "2025-08-11 13:20:00", "2025-08-11 14:00:59"
+        )
+
+        print(f"\n⏱️  INTRADAY DATA SAMPLE:")
+        if intraday_sample:
+            for row in intraday_sample:
+                ts, heart, steps = row[0], row[6], row[9]
+                print(f"   {ts}: {steps} steps | {heart} bpm")
+
+            n = db.conn.execute(
+                "SELECT COUNT(*) FROM intraday_data WHERE patient_id = ?", (patient_id,)
+            ).fetchone()[0]
+            print(f"   → Total intraday records: {n}")
+
+            min_ts, max_ts = db.conn.execute(
+                "SELECT MIN(timestamp), MAX(timestamp) FROM intraday_data WHERE patient_id = ?",
+                (patient_id,),
+            ).fetchone()
+            print(f"   → Date range: {min_ts} to {max_ts}")
+        else:
+            print("   No intraday data found")
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":
     patient_id = test_database_operations()
-    peek_database("test.db")
+    peek_database()
