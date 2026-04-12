@@ -1,3 +1,3 @@
-Name: Arthur Tian
+README
 =====
-i love pink haired girls
+Read the documentation lol
