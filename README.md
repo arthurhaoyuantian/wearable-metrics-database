@@ -1,3 +1,3 @@
-README
+README!
 =====
 Read the documentation lol
