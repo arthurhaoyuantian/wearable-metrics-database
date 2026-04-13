@@ -49,8 +49,7 @@ class MetricSelectionDialog(QDialog):
         self._rows = {}
 
         info = QLabel(
-            "Choose metrics for this graph window. Blood pressure has no Fitbit API yet "
-            "(columns exist for manual entry). Re-authorize Fitbit if you add SpO2 scope."
+            "Choose metrics for this graph window."
         )
         info.setWordWrap(True)
 
