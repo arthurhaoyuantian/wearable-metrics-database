@@ -558,7 +558,7 @@ class GraphWindow(QWidget):
                             idx = self.source_combo.findData(prev_source)
                             if idx >= 0:
                                 self.source_combo.setCurrentIndex(idx)
-                    except Exception:
+                    except Exception as e:
                         log.exception("show_graph: Fitbit import failed")
                         self.status_label.setText(f"Error importing Fitbit data: {str(e)}")
                         daily_data = existing_daily_data
@@ -728,10 +728,10 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.graph_windows = []
-        self.setWindowTitle("Smartwatch Data App")
+        self.setWindowTitle("Wearable Health Data Aggregation App")
         self.resize(900, 520)
 
-        title = QLabel("Smartwatch EHR")
+        title = QLabel("Wearable Health Database")
         title.setAlignment(Qt.AlignCenter)
         title.setFont(QFont("Arial", 24))
 
