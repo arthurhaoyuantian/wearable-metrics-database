@@ -30,6 +30,14 @@ from src.integrations.csv_import import import_daily_csv, list_dates_in_daily_cs
 log = logging.getLogger(__name__)
 
 
+def _window_ui_scale(width, height, ref_w, ref_h, lo=0.65, hi=1.75):
+    """Scale factor from window size vs design reference; clamped for readability."""
+    if ref_w <= 0 or ref_h <= 0:
+        return 1.0
+    s = min(width / float(ref_w), height / float(ref_h))
+    return max(lo, min(hi, s))
+
+
 def _make_view_combo(daily_only=False):
     combo = QComboBox()
     if daily_only:
@@ -65,15 +73,32 @@ class MetricSelectionDialog(QDialog):
             form.addLayout(row)
             self._rows[key] = (cb, combo)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self._dialog_button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self._dialog_button_box.accepted.connect(self.accept)
+        self._dialog_button_box.rejected.connect(self.reject)
+        self._dialog_ref_w, self._dialog_ref_h = 560, 480
 
         layout = QVBoxLayout()
         layout.addWidget(info)
         layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.addWidget(self._dialog_button_box)
         self.setLayout(layout)
+        self._apply_dialog_button_scale()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_dialog_button_scale()
+
+    def _apply_dialog_button_scale(self):
+        s = _window_ui_scale(self.width(), self.height(), self._dialog_ref_w, self._dialog_ref_h)
+        pt = max(8.0, min(18.0, 9.0 * s))
+        f = QFont()
+        f.setPointSizeF(pt)
+        for role in (QDialogButtonBox.Ok, QDialogButtonBox.Cancel):
+            b = self._dialog_button_box.button(role)
+            if b:
+                b.setFont(f)
+                b.setMinimumHeight(int(26 * s))
 
     def get_selection(self):
         selection = {}
@@ -132,14 +157,15 @@ class GraphWindow(QWidget):
         self.canvas = FigureCanvas(self.figure)
 
         small_font = QFont("Arial", 10)
-        self.chart_button.setFont(small_font)
-        self.zoom_in_button.setFont(small_font)
-        self.zoom_out_button.setFont(small_font)
         self.patient_label.setFont(small_font)
         self.view_config_label.setFont(small_font)
         self.from_date_edit.setFont(small_font)
         self.to_date_edit.setFont(small_font)
         self.source_combo.setFont(small_font)
+
+        self._graph_ref_w, self._graph_ref_h = 1366, 768
+        self._graph_btn_base_pt = 10.0
+        self._apply_graph_button_scale()
 
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Patient:"))
@@ -694,7 +720,24 @@ class GraphWindow(QWidget):
             len(daily_data),
             len(intraday_data),
         )
-    
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_graph_button_scale()
+
+    def _apply_graph_button_scale(self):
+        s = _window_ui_scale(self.width(), self.height(), self._graph_ref_w, self._graph_ref_h)
+        pt = max(8.0, min(20.0, self._graph_btn_base_pt * s))
+        f = QFont("Arial")
+        f.setPointSizeF(pt)
+        for btn in (self.chart_button, self.zoom_in_button, self.zoom_out_button):
+            btn.setFont(f)
+        side = max(22, int(30 * s))
+        self.zoom_in_button.setMinimumSize(side, side)
+        self.zoom_out_button.setMinimumSize(side, side)
+        self.chart_button.setMinimumHeight(int(30 * s))
+        self.chart_button.setMinimumWidth(int(96 * s))
+
     def closeEvent(self, event):
         log.info("GraphWindow closing (DB connection close)")
         self.db.close()
@@ -709,15 +752,32 @@ class AddPatientDialog(QDialog):
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("Enter patient name")
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self._dialog_button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self._dialog_button_box.accepted.connect(self.accept)
+        self._dialog_button_box.rejected.connect(self.reject)
+        self._dialog_ref_w, self._dialog_ref_h = 300, 120
 
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Patient Name:"))
         layout.addWidget(self.name_input)
-        layout.addWidget(buttons)
+        layout.addWidget(self._dialog_button_box)
         self.setLayout(layout)
+        self._apply_add_patient_button_scale()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_add_patient_button_scale()
+
+    def _apply_add_patient_button_scale(self):
+        s = _window_ui_scale(self.width(), self.height(), self._dialog_ref_w, self._dialog_ref_h)
+        pt = max(8.0, min(18.0, 9.0 * s))
+        f = QFont()
+        f.setPointSizeF(pt)
+        for role in (QDialogButtonBox.Ok, QDialogButtonBox.Cancel):
+            b = self._dialog_button_box.button(role)
+            if b:
+                b.setFont(f)
+                b.setMinimumHeight(int(26 * s))
 
     def get_name(self):
         return self.name_input.text().strip()
@@ -749,9 +809,15 @@ class MainWindow(QWidget):
 
         self.add_patient_button = QPushButton("Add Patient")
         self.add_patient_button.clicked.connect(self.on_add_patient)
+        self.delete_patient_button = QPushButton("Delete Patient")
+        self.delete_patient_button.clicked.connect(self.on_delete_patient)
         self.import_csv_button = QPushButton("Import daily CSV…")
         self.import_csv_button.clicked.connect(self.on_import_daily_csv)
-        
+
+        self._main_ref_w, self._main_ref_h = 900, 520
+        self._main_btn_base_pt = 10.0
+        self._apply_main_button_scale()
+
         row = QHBoxLayout()
         row.addWidget(QLabel("Patient:"))
         row.addWidget(self.patient_dropdown)
@@ -759,6 +825,7 @@ class MainWindow(QWidget):
         row.addWidget(self.open_graph_button)
         row.addWidget(self.import_csv_button)
         row.addWidget(self.add_patient_button)
+        row.addWidget(self.delete_patient_button)
 
         layout = QVBoxLayout()
         layout.addStretch()
@@ -771,6 +838,30 @@ class MainWindow(QWidget):
 
         self.connect_button.clicked.connect(self.on_login_click)
         self.open_graph_button.clicked.connect(self.open_graph_window)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_main_button_scale()
+
+    def _apply_main_button_scale(self):
+        s = _window_ui_scale(self.width(), self.height(), self._main_ref_w, self._main_ref_h)
+        pt = max(8.0, min(20.0, self._main_btn_base_pt * s))
+        f = QFont("Arial")
+        f.setPointSizeF(pt)
+        for btn in (
+            self.connect_button,
+            self.open_graph_button,
+            self.import_csv_button,
+            self.add_patient_button,
+            self.delete_patient_button,
+        ):
+            btn.setFont(f)
+            btn.setMinimumHeight(int(30 * s))
+        self.connect_button.setMinimumWidth(int(138 * s))
+        self.open_graph_button.setMinimumWidth(int(168 * s))
+        self.import_csv_button.setMinimumWidth(int(138 * s))
+        self.add_patient_button.setMinimumWidth(int(108 * s))
+        self.delete_patient_button.setMinimumWidth(int(128 * s))
 
     def on_import_daily_csv(self):
         patient_id = self.patient_dropdown.currentData()
@@ -872,7 +963,41 @@ class MainWindow(QWidget):
         else:
             self.status_label.setText("Failed to add patient (may already exist).")
             log.warning("add_patient failed for name=%r (integrity?)", name)
-    
+
+    def _close_graph_windows_for_patient(self, patient_id):
+        to_close = [gw for gw in self.graph_windows if gw._patient_id == patient_id]
+        for gw in to_close:
+            gw.close()
+        self.graph_windows = [gw for gw in self.graph_windows if gw._patient_id != patient_id]
+
+    def on_delete_patient(self):
+        patient_id = self.patient_dropdown.currentData()
+        if patient_id is None:
+            self.status_label.setText("No patient selected to delete.")
+            return
+        label = self.patient_dropdown.currentText()
+        reply = QMessageBox.question(
+            self,
+            "Delete patient?",
+            f"Permanently delete {label} and all daily and intraday health data for this "
+            "patient?\n\nThis cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            self.status_label.setText("Delete cancelled.")
+            log.info("delete_patient cancelled for patient_id=%s", patient_id)
+            return
+        ok = self.db.delete_patient(patient_id)
+        if ok:
+            self._close_graph_windows_for_patient(patient_id)
+            self.refresh_patients()
+            self.status_label.setText(f"Deleted patient: {label}.")
+            log.info("Deleted patient_id=%s (%s)", patient_id, label)
+        else:
+            self.status_label.setText("Failed to delete patient (see logs).")
+            log.error("delete_patient failed for patient_id=%s", patient_id)
+
     def refresh_patients(self):
         self.patient_dropdown.clear()
         patients = self.db.get_all_patients()
